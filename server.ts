@@ -2,7 +2,6 @@ import express from 'express';
 import path from 'path';
 import http from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import { Room, User, Message, PlaylistItem, SocketMessage } from './src/types.ts';
 
 // In-memory databases
@@ -104,10 +103,14 @@ async function startServer() {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on('upgrade', (request, socket, head) => {
-    // Only upgrade for ws protocol on matching route or let it handle everything
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
+    const { pathname } = new URL(request.url || '', 'http://localhost');
+    if (pathname === '/api/ws' || pathname === '/api/ws/') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    } else {
+      socket.destroy();
+    }
   });
 
   wss.on('connection', (ws: WebSocket) => {
@@ -630,6 +633,7 @@ async function startServer() {
 
   // Serve static assets or mount Vite dev middleware
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
