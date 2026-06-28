@@ -36,7 +36,7 @@ function broadcastToRoom(roomId: string, message: SocketMessage, excludeWs?: Web
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const PORT = 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
   app.use(express.json());
 
@@ -104,12 +104,10 @@ async function startServer() {
 
   server.on('upgrade', (request, socket, head) => {
     const { pathname } = new URL(request.url || '', 'http://localhost');
-    if (pathname === '/api/ws' || pathname === '/api/ws/') {
+    if (pathname.startsWith('/api/ws')) {
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
       });
-    } else {
-      socket.destroy();
     }
   });
 
