@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Play, 
   Volume2, 
@@ -16,7 +16,9 @@ import {
   ChevronRight,
   Radio,
   FileVideo,
-  FileAudio
+  FileAudio,
+  Youtube,
+  Link
 } from 'lucide-react';
 import { Room, User, Message, PlaylistItem, SocketMessage } from './types.ts';
 import VideoPlayer from './components/VideoPlayer.tsx';
@@ -42,6 +44,8 @@ export default function App() {
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [userLatency, setUserLatency] = useState<number>(0);
   const [isWebRTCStreaming, setIsWebRTCStreaming] = useState<boolean>(false);
+  const [directUrl, setDirectUrl] = useState<string>('');
+  const [directUrlError, setDirectUrlError] = useState<string>('');
 
   // WebSocket Connection
   const wsRef = useRef<WebSocket | null>(null);
@@ -60,6 +64,20 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('play_io_username', username);
   }, [username]);
+
+  // Auto-switch stages when the host selects a YouTube/Spotify or other media type
+  useEffect(() => {
+    if (roomState?.playback.activeItemId && roomState.playlist) {
+      const active = roomState.playlist.find(item => item.id === roomState.playback.activeItemId);
+      if (active) {
+        if (active.type.startsWith('video/')) {
+          setActiveTab('video');
+        } else if (active.type.startsWith('audio/')) {
+          setActiveTab('audio');
+        }
+      }
+    }
+  }, [roomState?.playback.activeItemId, roomState?.playlist]);
 
   // Establish WebSocket connection
   const connectToRoomSocket = (targetRoomId: string, joinName: string) => {
@@ -268,6 +286,80 @@ export default function App() {
         mode: targetMode,
       }));
     }
+  };
+
+  const handleDirectPlay = (e: React.FormEvent) => {
+    e.preventDefault();
+    setDirectUrlError('');
+
+    if (!directUrl.trim()) return;
+
+    const url = directUrl.trim();
+    let isYoutube = false;
+    let isSpotify = false;
+
+    if (url.includes('youtube.com') || url.includes('youtu.be')) {
+      isYoutube = true;
+    } else if (url.includes('spotify.com')) {
+      isSpotify = true;
+    }
+
+    if (!isYoutube && !isSpotify) {
+      setDirectUrlError('Please enter a valid YouTube or Spotify URL.');
+      return;
+    }
+
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setDirectUrlError('Connection not open.');
+      return;
+    }
+
+    // Try to extract a clean label name
+    let name = '';
+    let itemType = '';
+
+    if (isYoutube) {
+      itemType = 'video/youtube';
+      const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+      const match = url.match(regExp);
+      const ytId = (match && match[2].length === 11) ? match[2] : '';
+      name = `YouTube Live Video (${ytId || 'Stream'})`;
+    } else {
+      itemType = 'audio/spotify';
+      try {
+        const parsed = new URL(url);
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        if (parts.length >= 2) {
+          name = `Spotify ${parts[0].charAt(0).toUpperCase() + parts[0].slice(1)} (${parts[1].substring(0, 10)}...)`;
+        } else {
+          name = 'Spotify Stream';
+        }
+      } catch {
+        name = 'Spotify Synchronized Audio';
+      }
+    }
+
+    // Send direct-play WS command
+    wsRef.current.send(JSON.stringify({
+      type: 'direct-play',
+      item: {
+        name,
+        size: 0,
+        duration: 180, // 3 mins default sync length
+        type: itemType,
+        addedBy: username || 'Host',
+        url: url,
+      }
+    }));
+
+    // Auto switch tab
+    if (isYoutube) {
+      setActiveTab('video');
+    } else {
+      setActiveTab('audio');
+    }
+
+    setDirectUrl('');
   };
 
   // Clipboard Copiers
@@ -491,6 +583,85 @@ export default function App() {
               
               {/* Left Column (2/3 width on desktop): Media Stages */}
               <div className="lg:col-span-2 flex flex-col space-y-6">
+
+                {/* Direct Stream Hub */}
+                {isHost ? (
+                  <div className="bg-zinc-900 border border-zinc-800 p-4 md:p-5 rounded-2xl shadow-xl space-y-4 relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-24 h-24 bg-purple-500/5 rounded-full blur-2xl"></div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <Sparkles className="w-4 h-4 text-purple-400" />
+                        <h3 className="font-sans font-semibold text-zinc-100 text-sm tracking-wide">Instant Live Broadcast</h3>
+                      </div>
+                      
+                      {/* Platform Badges */}
+                      <div className="flex items-center space-x-2">
+                        <span className="flex items-center space-x-1 px-2.5 py-1 rounded-full bg-red-600/10 border border-red-500/20 text-[10px] font-bold text-red-400">
+                          <Youtube className="w-3 h-3" />
+                          <span>YouTube</span>
+                        </span>
+                        <span className="flex items-center space-x-1 px-2.5 py-1 rounded-full bg-green-600/10 border border-green-500/20 text-[10px] font-bold text-green-400">
+                          <Music className="w-3 h-3" />
+                          <span>Spotify</span>
+                        </span>
+                      </div>
+                    </div>
+
+                    <form onSubmit={handleDirectPlay} className="flex flex-col sm:flex-row gap-3">
+                      <div className="relative flex-1">
+                        <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                          <Link className="w-4 h-4 text-zinc-500" />
+                        </div>
+                        <input
+                          type="url"
+                          required
+                          placeholder="Paste a YouTube Video URL or Spotify track link..."
+                          value={directUrl}
+                          onChange={(e) => setDirectUrl(e.target.value)}
+                          className="w-full bg-zinc-950 border border-zinc-850 pl-9 pr-3 py-2.5 text-xs text-zinc-100 rounded-xl focus:outline-none focus:border-purple-500/50 transition-colors placeholder-zinc-500"
+                        />
+                        {directUrl && (
+                          <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                            {directUrl.includes('youtube.com') || directUrl.includes('youtu.be') ? (
+                              <span className="text-[10px] font-bold text-red-400 uppercase tracking-wider animate-pulse bg-red-500/10 px-2 py-0.5 rounded border border-red-500/20">YouTube Detected</span>
+                            ) : directUrl.includes('spotify.com') ? (
+                              <span className="text-[10px] font-bold text-green-400 uppercase tracking-wider animate-pulse bg-green-500/10 px-2 py-0.5 rounded border border-green-500/20">Spotify Detected</span>
+                            ) : null}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="submit"
+                        className="px-5 py-2.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-zinc-100 text-xs font-bold rounded-xl shadow-lg hover:shadow-purple-500/15 transition-all flex items-center justify-center space-x-1.5 cursor-pointer flex-shrink-0"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        <span>Host Stream Now</span>
+                      </button>
+                    </form>
+                    
+                    {directUrlError && (
+                      <p className="text-[11px] text-red-400 font-mono mt-1">{directUrlError}</p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="bg-zinc-900/40 border border-zinc-850/60 p-4 rounded-xl flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center text-purple-400">
+                        <Sparkles className="w-4 h-4 animate-pulse" />
+                      </div>
+                      <div>
+                        <h4 className="font-sans font-medium text-xs text-zinc-200">Host Live Stream Channel</h4>
+                        <p className="text-[10px] text-zinc-500">The room host can instantly stream YouTube and Spotify on this channel.</p>
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center space-x-1.5">
+                      <Youtube className="w-4 h-4 text-zinc-600" />
+                      <Music className="w-4 h-4 text-zinc-600" />
+                    </div>
+                  </div>
+                )}
                 
                 {/* Media Selector Tabs */}
                 <div className="flex bg-zinc-900/60 p-1 rounded-xl border border-zinc-850 w-fit">
@@ -519,32 +690,37 @@ export default function App() {
                 </div>
 
                 {/* Render Selected Stage */}
-                {activeTab === 'video' ? (
-                  <VideoPlayer
-                    ws={wsRef.current}
-                    roomId={roomId}
-                    isHost={isHost}
-                    activeMediaName={roomState?.playback.mediaName || ''}
-                    activeMediaSize={roomState?.playback.mediaSize || 0}
-                    activeItemId={roomState?.playback.activeItemId}
-                    streamMode={roomState?.streamMode || 'sync'}
-                    users={roomState?.users || []}
-                    onMediaLoaded={handleMediaLoaded}
-                    onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
-                    onWebRTCStatusChange={setIsWebRTCStreaming}
-                  />
-                ) : (
-                  <AudioPlayer
-                    ws={wsRef.current}
-                    roomId={roomId}
-                    isHost={isHost}
-                    activeMediaName={roomState?.playback.mediaName || ''}
-                    activeMediaSize={roomState?.playback.mediaSize || 0}
-                    activeItemId={roomState?.playback.activeItemId}
-                    onMediaLoaded={handleMediaLoaded}
-                    onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
-                  />
-                )}
+                {(() => {
+                  const activeItem = roomState?.playlist.find(item => item.id === roomState?.playback.activeItemId);
+                  return activeTab === 'video' ? (
+                    <VideoPlayer
+                      ws={wsRef.current}
+                      roomId={roomId}
+                      isHost={isHost}
+                      activeMediaName={roomState?.playback.mediaName || ''}
+                      activeMediaSize={roomState?.playback.mediaSize || 0}
+                      activeItemId={roomState?.playback.activeItemId}
+                      streamMode={roomState?.streamMode || 'sync'}
+                      users={roomState?.users || []}
+                      onMediaLoaded={handleMediaLoaded}
+                      onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
+                      onWebRTCStatusChange={setIsWebRTCStreaming}
+                      activeItem={activeItem}
+                    />
+                  ) : (
+                    <AudioPlayer
+                      ws={wsRef.current}
+                      roomId={roomId}
+                      isHost={isHost}
+                      activeMediaName={roomState?.playback.mediaName || ''}
+                      activeMediaSize={roomState?.playback.mediaSize || 0}
+                      activeItemId={roomState?.playback.activeItemId}
+                      onMediaLoaded={handleMediaLoaded}
+                      onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
+                      activeItem={activeItem}
+                    />
+                  );
+                })()}
 
                 {/* Users presence list widget */}
                 <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-xl flex flex-col space-y-3">

@@ -21,9 +21,10 @@ export interface PlaylistItem {
   name: string;
   size: number;
   duration: number; // in seconds
-  type: string;     // mime type (e.g., 'video/mp4', 'audio/mp3')
+  type: string;     // mime type (e.g., 'video/mp4', 'audio/mp3', 'video/youtube', 'audio/spotify')
   addedBy: string;  // username
   votesToSkip: string[]; // array of userIds
+  url?: string;
 }
 
 export interface PlaybackState {
@@ -34,6 +35,7 @@ export interface PlaybackState {
   mediaSize: number;
   mediaType: 'video' | 'audio' | 'none';
   activeItemId?: string;
+  url?: string;
 }
 
 export interface Room {
@@ -56,7 +58,9 @@ export type SocketMessage =
   | { type: 'seek'; currentTime: number }
   | { type: 'playback-status'; isPlaying: boolean; currentTime: number; mediaName: string; mediaSize: number; mediaType: 'video' | 'audio' | 'none'; activeItemId?: string }
   | { type: 'add-playlist'; item: Omit<PlaylistItem, 'id' | 'votesToSkip'> }
+  | { type: 'direct-play'; item: Omit<PlaylistItem, 'id' | 'votesToSkip'> }
   | { type: 'remove-playlist'; itemId: string }
+  | { type: 'select-item'; itemId: string }
   | { type: 'vote-skip'; itemId: string }
   | { type: 'set-stream-mode'; mode: 'sync' | 'stream' }
   | { type: 'webrtc-signal'; targetId: string; signal: any }

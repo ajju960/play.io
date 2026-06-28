@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { Play, Pause, RotateCcw, Volume2, VolumeX, Maximize, AlertCircle, FileVideo, Radio } from 'lucide-react';
-import { User } from '../types.ts';
+import { User, PlaylistItem } from '../types.ts';
 
 interface VideoPlayerProps {
   ws: WebSocket | null;
@@ -14,6 +14,7 @@ interface VideoPlayerProps {
   onMediaLoaded: (name: string, size: number) => void;
   onPlaybackStatusUpdate: (isPlaying: boolean, currentTime: number) => void;
   onWebRTCStatusChange: (active: boolean) => void;
+  activeItem?: PlaylistItem;
 }
 
 export default function VideoPlayer({
@@ -28,9 +29,11 @@ export default function VideoPlayer({
   onMediaLoaded,
   onPlaybackStatusUpdate,
   onWebRTCStatusChange,
+  activeItem,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const youtubeIframeRef = useRef<HTMLIFrameElement | null>(null);
   
   const [localFile, setLocalFile] = useState<File | null>(null);
   const [videoSrc, setVideoSrc] = useState<string>('');
@@ -40,6 +43,48 @@ export default function VideoPlayer({
   const [volume, setVolume] = useState<number>(0.8);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isDragging, setIsDragging] = useState<boolean>(false);
+
+  // YouTube helper functions and states
+  const getYoutubeId = (url: string) => {
+    if (!url) return null;
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const match = url.match(regExp);
+    return (match && match[2].length === 11) ? match[2] : null;
+  };
+
+  const youtubeId = activeItem?.type === 'video/youtube' ? getYoutubeId(activeItem.url || '') : null;
+
+  // Reset states when active YouTube video changes
+  useEffect(() => {
+    if (youtubeId) {
+      setCurrentTime(0);
+      setIsPlaying(false);
+      setDuration(activeItem?.duration || 180);
+    }
+  }, [youtubeId, activeItem]);
+
+  // YouTube tick timer for advancing progress bar
+  useEffect(() => {
+    if (!youtubeId || !isPlaying) return;
+
+    const interval = setInterval(() => {
+      setCurrentTime((prev) => {
+        const next = prev + 1;
+        const maxDuration = activeItem?.duration || 180;
+        if (next >= maxDuration) {
+          setIsPlaying(false);
+          clearInterval(interval);
+          return maxDuration;
+        }
+        if (isHost) {
+          onPlaybackStatusUpdate(true, next);
+        }
+        return next;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isPlaying, youtubeId, isHost, activeItem?.duration]);
 
   // WebRTC Streaming Refs
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -91,10 +136,34 @@ export default function VideoPlayer({
     const handleSocketMessage = (event: MessageEvent) => {
       try {
         const msg = JSON.parse(event.data);
-        if (!videoRef.current && streamMode !== 'stream') return;
+        if (!videoRef.current && !youtubeId && streamMode !== 'stream') return;
 
         if (msg.type === 'sync-event') {
           const { action, currentTime: syncTime, senderId } = msg;
+
+          if (youtubeId) {
+            if (action === 'play') {
+              setIsPlaying(true);
+              youtubeIframeRef.current?.contentWindow?.postMessage(
+                JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+                '*'
+              );
+            } else if (action === 'pause') {
+              setIsPlaying(false);
+              youtubeIframeRef.current?.contentWindow?.postMessage(
+                JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }),
+                '*'
+              );
+            } else if (action === 'seek') {
+              setCurrentTime(syncTime);
+              youtubeIframeRef.current?.contentWindow?.postMessage(
+                JSON.stringify({ event: 'command', func: 'seekTo', args: [syncTime, true] }),
+                '*'
+              );
+            }
+            return;
+          }
+
           const video = videoRef.current;
           if (!video) return;
 
@@ -150,6 +219,20 @@ export default function VideoPlayer({
 
   // Host Action: Play
   const handlePlay = () => {
+    if (youtubeId) {
+      if (isHost) {
+        setIsPlaying(true);
+        youtubeIframeRef.current?.contentWindow?.postMessage(
+          JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+          '*'
+        );
+        ws?.send(JSON.stringify({
+          type: 'play',
+          currentTime: currentTime,
+        }));
+      }
+      return;
+    }
     if (!videoRef.current) return;
     if (isHost) {
       videoRef.current.play().catch(() => {});
@@ -163,6 +246,20 @@ export default function VideoPlayer({
 
   // Host Action: Pause
   const handlePause = () => {
+    if (youtubeId) {
+      if (isHost) {
+        setIsPlaying(false);
+        youtubeIframeRef.current?.contentWindow?.postMessage(
+          JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }),
+          '*'
+        );
+        ws?.send(JSON.stringify({
+          type: 'pause',
+          currentTime: currentTime,
+        }));
+      }
+      return;
+    }
     if (!videoRef.current) return;
     if (isHost) {
       videoRef.current.pause();
@@ -176,8 +273,22 @@ export default function VideoPlayer({
 
   // Host Action: Seek
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!videoRef.current) return;
     const seekTime = parseFloat(e.target.value);
+    if (youtubeId) {
+      if (isHost) {
+        setCurrentTime(seekTime);
+        youtubeIframeRef.current?.contentWindow?.postMessage(
+          JSON.stringify({ event: 'command', func: 'seekTo', args: [seekTime, true] }),
+          '*'
+        );
+        ws?.send(JSON.stringify({
+          type: 'seek',
+          currentTime: seekTime,
+        }));
+      }
+      return;
+    }
+    if (!videoRef.current) return;
     if (isHost) {
       videoRef.current.currentTime = seekTime;
       setCurrentTime(seekTime);
@@ -373,6 +484,15 @@ export default function VideoPlayer({
             playsInline
             className="w-full h-full object-contain"
           />
+        ) : youtubeId ? (
+          <iframe
+            id="youtube-player"
+            ref={youtubeIframeRef}
+            src={`https://www.youtube.com/embed/${youtubeId}?enablejsapi=1&autoplay=1&mute=${isMuted ? 1 : 0}&origin=${encodeURIComponent(window.location.origin)}`}
+            className="w-full h-full object-contain aspect-video"
+            allow="autoplay; encrypted-media"
+            allowFullScreen
+          />
         ) : videoSrc ? (
           <video
             id="main-video-player"
@@ -462,7 +582,7 @@ export default function VideoPlayer({
             min={0}
             max={duration || 100}
             value={currentTime}
-            disabled={!isHost || !videoSrc}
+            disabled={!isHost || (!videoSrc && !youtubeId)}
             onChange={handleSeek}
             className={`flex-1 h-1.5 rounded-lg bg-zinc-800 appearance-none cursor-pointer accent-purple-500 focus:outline-none ${
               !isHost ? 'opacity-50 cursor-not-allowed' : ''
@@ -480,7 +600,7 @@ export default function VideoPlayer({
             {isPlaying ? (
               <button
                 onClick={handlePause}
-                disabled={!isHost || !videoSrc}
+                disabled={!isHost || (!videoSrc && !youtubeId)}
                 className="w-10 h-10 flex items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                 title={isHost ? "Pause" : "Host Controlled"}
               >
@@ -489,7 +609,7 @@ export default function VideoPlayer({
             ) : (
               <button
                 onClick={handlePlay}
-                disabled={!isHost || !videoSrc}
+                disabled={!isHost || (!videoSrc && !youtubeId)}
                 className="w-10 h-10 flex items-center justify-center rounded-lg bg-purple-600 hover:bg-purple-500 text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                 title={isHost ? "Play" : "Host Controlled"}
               >
@@ -500,12 +620,19 @@ export default function VideoPlayer({
             {isHost && (
               <button
                 onClick={() => {
-                  if (videoRef.current) {
+                  if (youtubeId) {
+                    setCurrentTime(0);
+                    youtubeIframeRef.current?.contentWindow?.postMessage(
+                      JSON.stringify({ event: 'command', func: 'seekTo', args: [0, true] }),
+                      '*'
+                    );
+                    ws?.send(JSON.stringify({ type: 'seek', currentTime: 0 }));
+                  } else if (videoRef.current) {
                     videoRef.current.currentTime = 0;
                     ws?.send(JSON.stringify({ type: 'seek', currentTime: 0 }));
                   }
                 }}
-                disabled={!videoSrc}
+                disabled={!videoSrc && !youtubeId}
                 className="w-10 h-10 flex items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-all"
                 title="Restart"
               >
@@ -525,7 +652,7 @@ export default function VideoPlayer({
             <div className="flex items-center space-x-2 bg-zinc-950 px-3 py-1.5 rounded-lg border border-zinc-800">
               <button 
                 onClick={toggleMute} 
-                disabled={!videoSrc}
+                disabled={!videoSrc && !youtubeId}
                 className="text-zinc-400 hover:text-zinc-200"
               >
                 {isMuted ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4" />}
@@ -537,7 +664,7 @@ export default function VideoPlayer({
                 step={0.05}
                 value={isMuted ? 0 : volume}
                 onChange={handleVolumeChange}
-                disabled={!videoSrc}
+                disabled={!videoSrc && !youtubeId}
                 className="w-16 h-1 rounded-lg bg-zinc-800 appearance-none cursor-pointer accent-purple-500"
               />
             </div>

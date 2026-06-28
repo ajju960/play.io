@@ -36,7 +36,7 @@ function broadcastToRoom(roomId: string, message: SocketMessage, excludeWs?: Web
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = 3000;
 
   app.use(express.json());
 
@@ -403,6 +403,74 @@ async function startServer() {
             break;
           }
 
+          case 'direct-play': {
+            const conn = activeConnections.get(ws);
+            if (!conn) return;
+            const { roomId, userId } = conn;
+            const room = rooms.get(roomId);
+            if (!room) return;
+
+            const newItem: PlaylistItem = {
+              ...data.item,
+              id: Math.random().toString(36).substring(2, 9),
+              votesToSkip: [],
+            };
+
+            // Add to the playlist queue so it's registered
+            room.playlist.push(newItem);
+
+            // Determine mediaType
+            let mType: 'video' | 'audio' | 'none' = 'none';
+            if (newItem.type.startsWith('video/')) {
+              mType = 'video';
+            } else if (newItem.type.startsWith('audio/')) {
+              mType = 'audio';
+            }
+
+            // Immediately set as active item AND set playing to true
+            room.playback = {
+              isPlaying: true,
+              currentTime: 0,
+              lastUpdated: Date.now(),
+              mediaName: newItem.name,
+              mediaSize: newItem.size || 0,
+              mediaType: mType,
+              activeItemId: newItem.id,
+              url: newItem.url,
+            };
+
+            // Send notification message
+            const systemMsg: Message = {
+              id: Math.random().toString(36).substring(2, 9),
+              roomId,
+              username: 'System',
+              text: `Direct playback of "${newItem.name}" started by ${newItem.addedBy}.`,
+              timestamp: Date.now(),
+              isSystem: true,
+            };
+            const messages = roomMessages.get(roomId) || [];
+            messages.push(systemMsg);
+            
+            broadcastToRoom(roomId, {
+              type: 'new-message',
+              ...systemMsg,
+            });
+
+            // Broadcast play sync event so active players immediately spin up
+            broadcastToRoom(roomId, {
+              type: 'sync-event',
+              action: 'play',
+              currentTime: 0,
+              senderId: userId,
+            });
+
+            broadcastToRoom(roomId, {
+              type: 'room-state',
+              room,
+            });
+            break;
+          }
+
           case 'remove-playlist': {
             const conn = activeConnections.get(ws);
             if (!conn) return;
@@ -423,12 +491,67 @@ async function startServer() {
                 room.playback.mediaType = 'none';
                 room.playback.isPlaying = false;
                 room.playback.currentTime = 0;
+                room.playback.url = undefined;
               }
 
               broadcastToRoom(roomId, {
                 type: 'room-state',
                 room,
               });
+            }
+            break;
+          }
+
+          case 'select-item': {
+            const conn = activeConnections.get(ws);
+            if (!conn) return;
+            const { roomId, userId } = conn;
+            const room = rooms.get(roomId);
+            if (!room) return;
+
+            // Only host can select active item
+            if (room.hostId === userId) {
+              const item = room.playlist.find(i => i.id === data.itemId);
+              if (item) {
+                let mType: 'video' | 'audio' | 'none' = 'none';
+                if (item.type.startsWith('video/')) {
+                  mType = 'video';
+                } else if (item.type.startsWith('audio/')) {
+                  mType = 'audio';
+                }
+
+                room.playback = {
+                  isPlaying: false,
+                  currentTime: 0,
+                  lastUpdated: Date.now(),
+                  mediaName: item.name,
+                  mediaSize: item.size || 0,
+                  mediaType: mType,
+                  activeItemId: item.id,
+                  url: item.url,
+                };
+
+                const systemMsg: Message = {
+                  id: Math.random().toString(36).substring(2, 9),
+                  roomId,
+                  username: 'System',
+                  text: `Host selected "${item.name}" to play.`,
+                  timestamp: Date.now(),
+                  isSystem: true,
+                };
+                const messages = roomMessages.get(roomId) || [];
+                messages.push(systemMsg);
+
+                broadcastToRoom(roomId, {
+                  type: 'new-message',
+                  ...systemMsg,
+                });
+
+                broadcastToRoom(roomId, {
+                  type: 'room-state',
+                  room,
+                });
+              }
             }
             break;
           }

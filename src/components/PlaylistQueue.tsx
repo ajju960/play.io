@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, ArrowUpRight, Music, Film, CheckCircle, Flame } from 'lucide-react';
+import { Plus, Trash2, ArrowUpRight, Music, Film, CheckCircle, Flame, Play } from 'lucide-react';
 import { PlaylistItem, User } from '../types.ts';
 
 interface PlaylistQueueProps {
@@ -25,12 +25,15 @@ export default function PlaylistQueue({
   const [itemName, setItemName] = useState('');
   const [itemType, setItemType] = useState('audio/mp3');
   const [itemDuration, setItemDuration] = useState('180'); // mock standard length (3 mins)
+  const [mediaUrl, setMediaUrl] = useState('');
 
   const handleAddCustomItem = (e: React.FormEvent) => {
     e.preventDefault();
     if (!itemName.trim() || !ws) return;
 
     const durationNum = parseInt(itemDuration, 10) || 180;
+    const isExternal = itemType === 'video/youtube' || itemType === 'audio/spotify';
+    if (isExternal && !mediaUrl.trim()) return;
 
     ws.send(JSON.stringify({
       type: 'add-playlist',
@@ -40,11 +43,22 @@ export default function PlaylistQueue({
         duration: durationNum,
         type: itemType,
         addedBy: username,
+        url: isExternal ? mediaUrl.trim() : undefined,
       }
     }));
 
     setItemName('');
+    setMediaUrl('');
     setShowAddForm(false);
+  };
+
+  const handlePlayItem = (itemId: string) => {
+    if (ws) {
+      ws.send(JSON.stringify({
+        type: 'select-item',
+        itemId,
+      }));
+    }
   };
 
   // Local file browser to add item directly
@@ -134,6 +148,8 @@ export default function PlaylistQueue({
                 >
                   <option value="audio/mp3">Audio (MP3)</option>
                   <option value="video/mp4">Video (MP4)</option>
+                  <option value="video/youtube">YouTube Video</option>
+                  <option value="audio/spotify">Spotify Link</option>
                 </select>
               </div>
               <div>
@@ -147,17 +163,41 @@ export default function PlaylistQueue({
               </div>
             </div>
 
+            {(itemType === 'video/youtube' || itemType === 'audio/spotify') && (
+              <div>
+                <label className="block text-zinc-400 font-medium mb-1">
+                  {itemType === 'video/youtube' ? 'YouTube Video URL' : 'Spotify Link (Track/Playlist/Album)'}
+                </label>
+                <input
+                  type="url"
+                  placeholder={
+                    itemType === 'video/youtube' 
+                      ? "https://www.youtube.com/watch?v=..." 
+                      : "https://open.spotify.com/track/..."
+                  }
+                  value={mediaUrl}
+                  onChange={(e) => setMediaUrl(e.target.value)}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 focus:outline-none focus:border-purple-500/50"
+                  required
+                />
+              </div>
+            )}
+
             <div className="flex items-center justify-between pt-2">
               {/* Native File option */}
-              <label className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded cursor-pointer font-medium transition-colors border border-zinc-750">
-                Browse File
-                <input
-                  type="file"
-                  accept="video/*,audio/*"
-                  onChange={handleLocalFileAdd}
-                  className="hidden"
-                />
-              </label>
+              {itemType !== 'video/youtube' && itemType !== 'audio/spotify' ? (
+                <label className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded cursor-pointer font-medium transition-colors border border-zinc-750">
+                  Browse File
+                  <input
+                    type="file"
+                    accept="video/*,audio/*"
+                    onChange={handleLocalFileAdd}
+                    className="hidden"
+                  />
+                </label>
+              ) : (
+                <div />
+              )}
 
               <div className="flex space-x-2">
                 <button
@@ -192,6 +232,8 @@ export default function PlaylistQueue({
         ) : (
           playlist.map((item, index) => {
             const isActive = activeItemId === item.id;
+            const isYoutube = item.type === 'video/youtube';
+            const isSpotify = item.type === 'audio/spotify';
             const isVideo = item.type.startsWith('video/');
             const userVoted = false; // logic would depend on users lists, but can toggle color based on skip action
 
@@ -209,16 +251,26 @@ export default function PlaylistQueue({
                   <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 border transition-all ${
                     isActive
                       ? 'bg-purple-600/20 border-purple-500/30 text-purple-400'
-                      : 'bg-zinc-950 border-zinc-800 text-zinc-500 group-hover:text-zinc-300'
+                      : isYoutube
+                        ? 'bg-red-600/10 border-red-500/20 text-red-400'
+                        : isSpotify
+                          ? 'bg-green-600/10 border-green-500/20 text-green-400'
+                          : 'bg-zinc-950 border-zinc-800 text-zinc-500 group-hover:text-zinc-300'
                   }`}>
                     {isVideo ? <Film className="w-4 h-4" /> : <Music className="w-4 h-4" />}
                   </div>
 
                   <div className="min-w-0">
-                    <div className="flex items-center space-x-1.5">
+                    <div className="flex items-center space-x-1.5 flex-wrap gap-1">
                       <span className={`text-xs font-semibold truncate ${isActive ? 'text-purple-400' : 'text-zinc-200'}`}>
                         {item.name}
                       </span>
+                      {isYoutube && (
+                        <span className="px-1 py-0.5 bg-red-600/10 border border-red-500/20 text-red-400 text-[8px] font-bold rounded tracking-wider uppercase">YT</span>
+                      )}
+                      {isSpotify && (
+                        <span className="px-1 py-0.5 bg-green-600/10 border border-green-500/20 text-green-400 text-[8px] font-bold rounded tracking-wider uppercase">Spotify</span>
+                      )}
                       {isActive && (
                         <span className="flex-shrink-0 flex h-2 w-2 relative">
                           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
@@ -234,6 +286,17 @@ export default function PlaylistQueue({
 
                 {/* Actions */}
                 <div className="flex items-center space-x-2 flex-shrink-0">
+                  {/* Play now (Only for host) */}
+                  {isHost && !isActive && (
+                    <button
+                      onClick={() => handlePlayItem(item.id)}
+                      className="p-1.5 rounded bg-purple-600/20 hover:bg-purple-600 text-purple-400 hover:text-zinc-100 border border-purple-500/20 transition-all cursor-pointer flex items-center justify-center"
+                      title="Play this item"
+                    >
+                      <Play className="w-3 h-3 fill-current" />
+                    </button>
+                  )}
+
                   {/* Skip voting */}
                   <button
                     onClick={() => handleVoteSkip(item.id)}
