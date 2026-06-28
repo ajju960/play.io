@@ -1,0 +1,6 @@
+{
+  "name": "PLAY.IO",
+  "description": "A synchronized real-time media player and chat space where users can watch videos and listen to music together with local file support, collaborative playlist queue, and live chat.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

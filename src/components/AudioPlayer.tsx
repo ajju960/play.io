@@ -1,0 +1,386 @@
+import React, { useRef, useState, useEffect } from 'react';
+import { Play, Pause, RotateCcw, Volume2, VolumeX, Music, HelpCircle, HardDriveDownload } from 'lucide-react';
+import AudioVisualizer from './AudioVisualizer.tsx';
+
+interface AudioPlayerProps {
+  ws: WebSocket | null;
+  roomId: string;
+  isHost: boolean;
+  activeMediaName: string;
+  activeMediaSize: number;
+  activeItemId: string | undefined;
+  onMediaLoaded: (name: string, size: number) => void;
+  onPlaybackStatusUpdate: (isPlaying: boolean, currentTime: number) => void;
+}
+
+export default function AudioPlayer({
+  ws,
+  roomId,
+  isHost,
+  activeMediaName,
+  activeMediaSize,
+  activeItemId,
+  onMediaLoaded,
+  onPlaybackStatusUpdate,
+}: AudioPlayerProps) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const [localFile, setLocalFile] = useState<File | null>(null);
+  const [audioSrc, setAudioSrc] = useState<string>('');
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(0);
+  const [volume, setVolume] = useState<number>(0.8);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+
+  // Clean up Object URL
+  useEffect(() => {
+    return () => {
+      if (audioSrc) {
+        URL.revokeObjectURL(audioSrc);
+      }
+    };
+  }, [audioSrc]);
+
+  // Handle local audio file selection
+  const handleFileChange = (file: File) => {
+    if (audioSrc) {
+      URL.revokeObjectURL(audioSrc);
+    }
+    const url = URL.createObjectURL(file);
+    setLocalFile(file);
+    setAudioSrc(url);
+    onMediaLoaded(file.name, file.size);
+  };
+
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const onDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith('audio/')) {
+      handleFileChange(file);
+    }
+  };
+
+  // Sync controls with Server WebSocket
+  useEffect(() => {
+    if (!ws) return;
+
+    const handleSocketMessage = (event: MessageEvent) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (!audioRef.current) return;
+
+        if (msg.type === 'sync-event') {
+          const { action, currentTime: syncTime } = msg;
+          const audio = audioRef.current;
+          const drift = Math.abs(audio.currentTime - syncTime);
+
+          if (action === 'play') {
+            setIsPlaying(true);
+            if (drift > 0.5) {
+              audio.currentTime = syncTime;
+            }
+            audio.play().catch(() => {});
+          } else if (action === 'pause') {
+            setIsPlaying(false);
+            if (drift > 0.5) {
+              audio.currentTime = syncTime;
+            }
+            audio.pause();
+          } else if (action === 'seek') {
+            audio.currentTime = syncTime;
+            setCurrentTime(syncTime);
+          }
+        }
+      } catch (err) {
+        console.error('AudioPlayer ws message error:', err);
+      }
+    };
+
+    ws.addEventListener('message', handleSocketMessage);
+    return () => {
+      ws.removeEventListener('message', handleSocketMessage);
+    };
+  }, [ws]);
+
+  const handleTimeUpdate = () => {
+    if (!audioRef.current) return;
+    const time = audioRef.current.currentTime;
+    setCurrentTime(time);
+
+    // Periodically send state to other users
+    if (isHost && isPlaying) {
+      onPlaybackStatusUpdate(true, time);
+    }
+  };
+
+  const handleLoadedMetadata = () => {
+    if (!audioRef.current) return;
+    setDuration(audioRef.current.duration);
+  };
+
+  const handlePlay = () => {
+    if (!audioRef.current) return;
+    if (isHost) {
+      audioRef.current.play().catch(() => {});
+      setIsPlaying(true);
+      ws?.send(JSON.stringify({
+        type: 'play',
+        currentTime: audioRef.current.currentTime,
+      }));
+    }
+  };
+
+  const handlePause = () => {
+    if (!audioRef.current) return;
+    if (isHost) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+      ws?.send(JSON.stringify({
+        type: 'pause',
+        currentTime: audioRef.current.currentTime,
+      }));
+    }
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!audioRef.current) return;
+    const seekTime = parseFloat(e.target.value);
+    if (isHost) {
+      audioRef.current.currentTime = seekTime;
+      setCurrentTime(seekTime);
+      ws?.send(JSON.stringify({
+        type: 'seek',
+        currentTime: seekTime,
+      }));
+    }
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const vol = parseFloat(e.target.value);
+    setVolume(vol);
+    if (audioRef.current) {
+      audioRef.current.volume = vol;
+    }
+    setIsMuted(vol === 0);
+  };
+
+  const toggleMute = () => {
+    if (!audioRef.current) return;
+    const mute = !isMuted;
+    setIsMuted(mute);
+    audioRef.current.muted = mute;
+  };
+
+  const formatTime = (timeInSecs: number) => {
+    if (isNaN(timeInSecs)) return '0:00';
+    const mins = Math.floor(timeInSecs / 60);
+    const secs = Math.floor(timeInSecs % 60);
+    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  };
+
+  const requiresMediaFile = activeMediaName && !localFile;
+
+  return (
+    <div id="audio-player-component" className="flex flex-col space-y-4 bg-zinc-950 p-4 md:p-6 rounded-xl border border-zinc-800 shadow-2xl">
+      {/* Audio Element Hidden */}
+      {audioSrc && (
+        <audio
+          id="main-audio-element"
+          ref={audioRef}
+          src={audioSrc}
+          onTimeUpdate={handleTimeUpdate}
+          onLoadedMetadata={handleLoadedMetadata}
+          onPlay={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
+        />
+      )}
+
+      {/* Visualizer Area */}
+      <AudioVisualizer 
+        audioElement={audioRef.current} 
+        isPlaying={isPlaying} 
+      />
+
+      {/* Active Track Metadata & Upload Panel */}
+      <div 
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+        className={`flex flex-col items-center justify-center py-5 px-4 rounded-lg border border-dashed transition-all ${
+          isDragging 
+            ? 'bg-zinc-900 border-pink-500 scale-[0.99]' 
+            : audioSrc 
+              ? 'bg-zinc-900/40 border-zinc-800' 
+              : 'bg-zinc-900/60 border-zinc-800'
+        }`}
+      >
+        {audioSrc ? (
+          <div className="flex items-center justify-between w-full">
+            <div className="flex items-center space-x-3 truncate">
+              <div className="w-10 h-10 bg-purple-600/10 border border-purple-500/20 text-purple-400 rounded-lg flex items-center justify-center flex-shrink-0 animate-spin-slow">
+                <Music className="w-5 h-5" />
+              </div>
+              <div className="truncate">
+                <h4 className="font-sans font-medium text-sm text-zinc-100 truncate">{localFile?.name || activeMediaName}</h4>
+                <p className="font-mono text-[10px] text-zinc-500 mt-0.5">
+                  {( (localFile?.size || activeMediaName ? activeMediaSize : 0) / (1024 * 1024) ).toFixed(2)} MB • Local Sync Active
+                </p>
+              </div>
+            </div>
+
+            <label className="flex items-center space-x-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded-lg cursor-pointer transition-colors border border-zinc-700">
+              <HardDriveDownload className="w-3.5 h-3.5" />
+              <span>Swap Track</span>
+              <input
+                type="file"
+                accept="audio/*"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleFileChange(file);
+                }}
+                className="hidden"
+              />
+            </label>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center text-center">
+            {requiresMediaFile ? (
+              <div className="flex flex-col items-center max-w-sm">
+                <HelpCircle className="w-10 h-10 text-cyan-400 mb-2 animate-bounce" />
+                <h4 className="font-sans font-semibold text-sm text-zinc-200">Matching Audio File Required</h4>
+                <p className="text-zinc-500 text-xs mt-1">
+                  The host loaded <span className="text-purple-400 font-mono text-xs">{activeMediaName}</span>. Select or drop your copy to synchronize!
+                </p>
+                <label className="mt-3 px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-zinc-100 text-xs font-medium rounded-lg shadow cursor-pointer transition-colors">
+                  Select {activeMediaName}
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleFileChange(file);
+                    }}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center">
+                <Music className="w-10 h-10 text-zinc-600 mb-2" />
+                <h4 className="font-sans font-medium text-sm text-zinc-300">Drag or browse local audio track</h4>
+                <p className="text-zinc-500 text-xs mt-0.5">MP3, WAV, FLAC, or AAC</p>
+                <label className="mt-3 px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded-lg cursor-pointer transition-colors border border-zinc-700">
+                  Select Audio
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleFileChange(file);
+                    }}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Control Area */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3.5 flex flex-col space-y-3">
+        {/* Progress Slider */}
+        <div className="flex items-center space-x-2.5">
+          <span className="text-[11px] font-mono text-zinc-500">{formatTime(currentTime)}</span>
+          <input
+            type="range"
+            min={0}
+            max={duration || 100}
+            value={currentTime}
+            disabled={!isHost || !audioSrc}
+            onChange={handleSeek}
+            className={`flex-1 h-1 rounded-lg bg-zinc-800 appearance-none cursor-pointer accent-purple-500 focus:outline-none ${
+              !isHost ? 'opacity-50 cursor-not-allowed' : ''
+            }`}
+          />
+          <span className="text-[11px] font-mono text-zinc-500">{formatTime(duration)}</span>
+        </div>
+
+        {/* Action Controls */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            {isPlaying ? (
+              <button
+                onClick={handlePause}
+                disabled={!isHost || !audioSrc}
+                className="w-9 h-9 flex items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 disabled:opacity-50 transition-all"
+                title={isHost ? "Pause" : "Host Controlled"}
+              >
+                <Pause className="w-4.5 h-4.5" />
+              </button>
+            ) : (
+              <button
+                onClick={handlePlay}
+                disabled={!isHost || !audioSrc}
+                className="w-9 h-9 flex items-center justify-center rounded-lg bg-purple-600 hover:bg-purple-500 text-zinc-100 disabled:opacity-50 transition-all"
+                title={isHost ? "Play" : "Host Controlled"}
+              >
+                <Play className="w-4.5 h-4.5 ml-0.5" />
+              </button>
+            )}
+
+            {isHost && (
+              <button
+                onClick={() => {
+                  if (audioRef.current) {
+                    audioRef.current.currentTime = 0;
+                    ws?.send(JSON.stringify({ type: 'seek', currentTime: 0 }));
+                  }
+                }}
+                disabled={!audioSrc}
+                className="w-9 h-9 flex items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-500 hover:text-zinc-300 transition-all"
+                title="Restart"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Sync mode text info */}
+          <span className="text-[10px] text-zinc-600 uppercase tracking-widest font-mono">
+            {isHost ? 'Active Controller' : 'Synced Guest'}
+          </span>
+
+          {/* Volume Control */}
+          <div className="flex items-center space-x-2 bg-zinc-950 px-2.5 py-1.5 rounded-lg border border-zinc-850">
+            <button onClick={toggleMute} disabled={!audioSrc} className="text-zinc-400 hover:text-zinc-200">
+              {isMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5" />}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={isMuted ? 0 : volume}
+              onChange={handleVolumeChange}
+              disabled={!audioSrc}
+              className="w-12 h-1 rounded bg-zinc-800 appearance-none accent-purple-500"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
