@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import http from 'http';
+import fs from 'fs';
 import { WebSocket, WebSocketServer } from 'ws';
 import { Room, User, Message, PlaylistItem, SocketMessage } from './src/types.ts';
 
@@ -97,6 +98,83 @@ async function startServer() {
       return res.status(404).json({ success: false, message: 'Room not found' });
     }
     res.json({ success: true, users: room.users });
+  });
+
+  // Setup directory for media uploads
+  const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+
+  // Upload raw file endpoint (ONLY THE HOST needs to upload)
+  app.post('/api/rooms/:roomId/upload', (req, res) => {
+    const { roomId } = req.params;
+    const filename = req.query.filename as string;
+    
+    if (!filename) {
+      return res.status(400).json({ success: false, message: 'Filename required' });
+    }
+
+    // Create a safe, unique filename
+    const safeName = `${Date.now()}-${filename.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+    const filePath = path.join(UPLOADS_DIR, safeName);
+
+    const writeStream = fs.createWriteStream(filePath);
+    req.pipe(writeStream);
+
+    writeStream.on('finish', () => {
+      const fileUrl = `/api/media/${safeName}`;
+      res.json({ success: true, url: fileUrl });
+    });
+
+    writeStream.on('error', (err) => {
+      console.error('File write error:', err);
+      res.status(500).json({ success: false, message: 'Upload failed' });
+    });
+  });
+
+  // Stream/Serve uploaded media with HTTP Range support for seeking
+  app.get('/api/media/:filename', (req, res) => {
+    const filePath = path.join(UPLOADS_DIR, req.params.filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).send('File not found');
+    }
+
+    const stat = fs.statSync(filePath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
+    // Detect MIME type based on file extension
+    const ext = path.extname(filePath).toLowerCase();
+    let mimeType = 'video/mp4';
+    if (ext === '.mp3') mimeType = 'audio/mpeg';
+    else if (ext === '.wav') mimeType = 'audio/wav';
+    else if (ext === '.ogg' || ext === '.oga') mimeType = 'audio/ogg';
+    else if (ext === '.webm') mimeType = 'video/webm';
+    else if (ext === '.m4a') mimeType = 'audio/mp4';
+
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunksize = (end - start) + 1;
+      const file = fs.createReadStream(filePath, { start, end });
+      const head = {
+        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': chunksize,
+        'Content-Type': mimeType,
+      };
+      res.writeHead(206, head);
+      file.pipe(res);
+    } else {
+      const head = {
+        'Content-Length': fileSize,
+        'Content-Type': mimeType,
+      };
+      res.writeHead(200, head);
+      fs.createReadStream(filePath).pipe(res);
+    }
   });
 
   // WebSocket Setup

@@ -37,6 +37,58 @@ export default function AudioPlayer({
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [isDragging, setIsDragging] = useState<boolean>(false);
 
+  // Background upload states
+  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+
+  const uploadFileToServer = (file: File) => {
+    setIsUploading(true);
+    setUploadProgress(0);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/rooms/${roomId}/upload?filename=${encodeURIComponent(file.name)}&type=${encodeURIComponent(file.type)}`, true);
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        setUploadProgress(percent);
+      }
+    };
+
+    xhr.onload = () => {
+      setIsUploading(false);
+      if (xhr.status === 200) {
+        try {
+          const res = JSON.parse(xhr.responseText);
+          if (res.success && res.url) {
+            ws?.send(JSON.stringify({
+              type: 'direct-play',
+              item: {
+                name: file.name,
+                size: file.size,
+                duration: audioRef.current?.duration || 180,
+                type: file.type,
+                addedBy: 'Host',
+                url: res.url,
+              }
+            }));
+          }
+        } catch (e) {
+          console.error('Failed to parse upload response:', e);
+        }
+      } else {
+        console.error('Upload failed with status:', xhr.status);
+      }
+    };
+
+    xhr.onerror = () => {
+      setIsUploading(false);
+      console.error('XHR Upload network error');
+    };
+
+    xhr.send(file);
+  };
+
   // Spotify helper functions and states
   const getSpotifyEmbedUrl = (url: string) => {
     if (!url) return null;
@@ -109,6 +161,10 @@ export default function AudioPlayer({
     setLocalFile(file);
     setAudioSrc(url);
     onMediaLoaded(file.name, file.size);
+
+    if (isHost) {
+      uploadFileToServer(file);
+    }
   };
 
   const onDragOver = (e: React.DragEvent) => {
@@ -182,7 +238,7 @@ export default function AudioPlayer({
     return () => {
       ws.removeEventListener('message', handleSocketMessage);
     };
-  }, [ws]);
+  }, [ws, spotifyEmbedUrl]);
 
   const handleTimeUpdate = () => {
     if (!audioRef.current) return;
@@ -290,16 +346,31 @@ export default function AudioPlayer({
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
-  const requiresMediaFile = activeMediaName && !localFile;
+  const effectiveAudioSrc = audioSrc || (activeItem?.url && !activeItem.url.includes('spotify.com') && !activeItem.url.includes('youtube.com') ? activeItem.url : '');
+
+  const requiresMediaFile = activeMediaName && !localFile && !spotifyEmbedUrl && !activeItem?.url;
 
   return (
-    <div id="audio-player-component" className="flex flex-col space-y-4 bg-zinc-950 p-4 md:p-6 rounded-xl border border-zinc-800 shadow-2xl">
+    <div id="audio-player-component" className="relative flex flex-col space-y-4 bg-zinc-950 p-4 md:p-6 rounded-xl border border-zinc-800 shadow-2xl">
+      {/* Uploading progress overlay */}
+      {isUploading && (
+        <div className="absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center p-6 text-center z-20 rounded-xl">
+          <div className="w-16 h-16 rounded-full border-4 border-purple-500/30 border-t-purple-500 animate-spin mb-4 flex items-center justify-center">
+            <span className="text-[10px] font-bold text-purple-400">{uploadProgress}%</span>
+          </div>
+          <h4 className="font-sans font-semibold text-sm text-zinc-200">Sharing Music with Room</h4>
+          <p className="text-zinc-500 text-xs mt-1 max-w-[280px]">
+            Uploading <strong className="text-zinc-300 font-mono text-[11px]">{localFile?.name || 'audio file'}</strong> to server so other guests can listen in real-time.
+          </p>
+        </div>
+      )}
+
       {/* Audio Element Hidden */}
-      {audioSrc && (
+      {effectiveAudioSrc && (
         <audio
           id="main-audio-element"
           ref={audioRef}
-          src={audioSrc}
+          src={effectiveAudioSrc}
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
           onPlay={() => setIsPlaying(true)}
@@ -353,12 +424,12 @@ export default function AudioPlayer({
           className={`flex flex-col items-center justify-center py-5 px-4 rounded-lg border border-dashed transition-all ${
             isDragging 
               ? 'bg-zinc-900 border-pink-500 scale-[0.99]' 
-              : audioSrc 
+              : effectiveAudioSrc 
                 ? 'bg-zinc-900/40 border-zinc-800' 
                 : 'bg-zinc-900/60 border-zinc-800'
           }`}
         >
-          {audioSrc ? (
+          {effectiveAudioSrc ? (
             <div className="flex items-center justify-between w-full">
               <div className="flex items-center space-x-3 truncate">
                 <div className="w-10 h-10 bg-purple-600/10 border border-purple-500/20 text-purple-400 rounded-lg flex items-center justify-center flex-shrink-0 animate-spin-slow">
@@ -407,6 +478,9 @@ export default function AudioPlayer({
                       className="hidden"
                     />
                   </label>
+                  <p className="text-[11px] text-zinc-500 mt-3 max-w-[280px] leading-relaxed">
+                    Don't have this audio? Ask the host to toggle the Room Mode to <strong className="text-purple-400">WebRTC Stream</strong> to listen directly without uploading!
+                  </p>
                 </div>
               ) : (
                 <div className="flex flex-col items-center">
